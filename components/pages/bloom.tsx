@@ -17,6 +17,7 @@ import {
 import { useEffect, useRef, useState } from "react";
 import { Magnetic } from "@/components/fx/magnetic";
 import { burstFrom } from "@/lib/burst";
+import { pendo } from "@/lib/pendo";
 import { clamp, cn } from "@/lib/utils";
 
 const PASTELS = ["#ff9ecd", "#ffc59e", "#c9a7ff", "#9ee6ff", "#a7f3c9", "#ffe58f"];
@@ -179,10 +180,23 @@ function SeedButton({ children, className }: { children: React.ReactNode; classN
 }
 
 const TAGLINES = ["bloom loudly.", "soft power, hard results.", "grown, not made.", "petal to the metal.", "naturally irresistible."];
+const DEFAULT_NAME = "Bloom & Co";
 
 function NameLab() {
-  const [name, setName] = useState("Bloom & Co");
+  const [name, setName] = useState(DEFAULT_NAME);
   const tagline = TAGLINES[name.length % TAGLINES.length];
+  const lastTracked = useRef("");
+
+  // Report the visitor's own brand once they pause typing for 1.5s (not blanks, the default or repeats).
+  useEffect(() => {
+    const trimmed = name.trim();
+    if (!trimmed || trimmed === DEFAULT_NAME || trimmed === lastTracked.current) return;
+    const t = setTimeout(() => {
+      lastTracked.current = trimmed;
+      pendo.track("brand_name_previewed", { brand_name: trimmed, name_length: trimmed.length, tagline });
+    }, 1500);
+    return () => clearTimeout(t);
+  }, [name, tagline]);
 
   return (
     <section className="relative px-6 py-32 text-center">
@@ -356,10 +370,24 @@ const WORK = [
 function HorizontalGallery() {
   const ref = useRef<HTMLElement>(null);
   const trackRef = useRef<HTMLDivElement>(null);
+  const enteredAt = useRef(0);
+  const completed = useRef(false);
   const distance = useMotionValue(0);
   const { scrollYProgress } = useScroll({ target: ref });
   const smooth = useSpring(scrollYProgress, { stiffness: 120, damping: 30 });
   const x = useTransform(() => -smooth.get() * distance.get());
+
+  // Report once per page view when the visitor has scrolled through to the last case study.
+  useMotionValueEvent(scrollYProgress, "change", (p) => {
+    if (p > 0 && !enteredAt.current) enteredAt.current = performance.now();
+    if (completed.current || p < 0.95) return;
+    completed.current = true;
+    pendo.track("portfolio_gallery_completed", {
+      work_count: WORK.length,
+      work_titles: WORK.map((w) => w.title).join(","),
+      time_to_complete_ms: Math.round(performance.now() - enteredAt.current),
+    });
+  });
 
   useEffect(() => {
     const track = trackRef.current;
