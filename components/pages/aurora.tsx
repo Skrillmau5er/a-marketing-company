@@ -9,7 +9,7 @@ import {
   useSpring,
   useTransform,
 } from "motion/react";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useEffectEvent, useRef, useState } from "react";
 import { Counter } from "@/components/fx/counter";
 import { GradientSlider } from "@/components/fx/gradient-slider";
 import { Magnetic } from "@/components/fx/magnetic";
@@ -21,6 +21,7 @@ import { TiltCard } from "@/components/fx/tilt-card";
 import { Typewriter } from "@/components/fx/typewriter";
 import { VelocityMarquee } from "@/components/fx/velocity-marquee";
 import { burstFrom } from "@/lib/burst";
+import { pendo } from "@/lib/pendo";
 import { cn } from "@/lib/utils";
 
 const WORDS = ["unforgettable.", "electric.", "go viral.", "iconic.", "glow."] as const;
@@ -286,6 +287,13 @@ const CHANNELS = [
 
 const compact = new Intl.NumberFormat("en-US", { notation: "compact", maximumFractionDigits: 1 });
 
+const INTENSITY_LABELS = ["Polite", "Bold", "Loud", "Unhinged"];
+const intensityLabel = (v: number) => INTENSITY_LABELS[Math.min(3, Math.floor(v / 25))];
+
+// Pendo: the last pricing estimate tracked this session. Module-level so a remount doesn't re-send it,
+// and so a contact form lead can carry the visitor's budget signal.
+let trackedEstimate: { signature: string; price: number; billingCycle: string } | null = null;
+
 function PricingLab() {
   const [reach, setReach] = useState(45);
   const [intensity, setIntensity] = useState(60);
@@ -310,6 +318,38 @@ function PricingLab() {
   useEffect(() => {
     hue.set(260 + reach * 1.4 + intensity * 0.6);
   }, [reach, intensity, hue]);
+
+  // Pendo: channels in CHANNELS order, so the same selection always reports the same value.
+  const channelIds = CHANNELS.filter((c) => channels.includes(c.id)).map((c) => c.id).join(",");
+  const billingCycle = yearly ? "yearly" : "monthly";
+  const signature = `${reach}|${intensity}|${channelIds}|${billingCycle}`;
+  // The configuration the lab mounted with. The visitor hasn't touched anything yet, so it isn't tracked.
+  const [untouched] = useState(signature);
+
+  const trackEstimate = useEffectEvent(() => {
+    trackedEstimate = { signature, price: Math.round(price), billingCycle };
+    pendo.track("pricing_estimate_configured", {
+      reach,
+      audience,
+      intensity,
+      intensity_label: intensityLabel(intensity),
+      channels: channelIds,
+      channel_count: channels.length,
+      channel_cost: channelCost,
+      billing_cycle: billingCycle,
+      monthly_price: monthly,
+      price: Math.round(price),
+      hype,
+    });
+  });
+
+  // Pendo: sliders fire onChange on every step, so wait until the visitor settles (1.5s after the last change).
+  // The untouched defaults and a repeat of the last tracked configuration aren't sent.
+  useEffect(() => {
+    if (signature === untouched || signature === trackedEstimate?.signature) return;
+    const timer = setTimeout(() => trackEstimate(), 1500);
+    return () => clearTimeout(timer);
+  }, [signature, untouched]);
 
   const toggle = (id: string) => setChannels((cs) => (cs.includes(id) ? cs.filter((c) => c !== id) : [...cs, id]));
 
@@ -342,7 +382,7 @@ function PricingLab() {
               min={0}
               max={100}
               onChange={setIntensity}
-              format={(v) => ["Polite", "Bold", "Loud", "Unhinged"][Math.min(3, Math.floor(v / 25))]}
+              format={intensityLabel}
               gradient="linear-gradient(90deg,#facc15,#fb7185,#ff2bd6)"
             />
 
@@ -494,6 +534,17 @@ function ContactCTA() {
                 const button = e.currentTarget.querySelector("button");
                 if (button) burstFrom(button, { count: 260, power: 18 });
                 setSent(true);
+                // Pendo: the site's only lead capture, and nothing is sent to a server, so this is the sole record of it.
+                // Sends the email's domain, never the address.
+                const at = email.lastIndexOf("@");
+                pendo.track("contact_form_submitted", {
+                  email_domain: at === -1 ? "" : email.slice(at + 1).trim().toLowerCase(),
+                  form_location: "aurora_contact_cta",
+                  ...(trackedEstimate && {
+                    estimate_price: trackedEstimate.price,
+                    estimate_billing_cycle: trackedEstimate.billingCycle,
+                  }),
+                });
               }}
               className="conic-border flex h-full rounded-full p-[2px]"
             >
@@ -503,6 +554,15 @@ function ContactCTA() {
                   required
                   value={email}
                   onChange={(e) => setEmail(e.target.value)}
+                  onInvalid={(e) => {
+                    // Pendo: native validation blocked the submit, so onSubmit never runs. Sends the length, never the value.
+                    const { validity, value } = e.currentTarget;
+                    pendo.track("contact_form_validation_failed", {
+                      error_type: validity.valueMissing ? "value_missing" : validity.typeMismatch ? "type_mismatch" : "other",
+                      input_length: value.length,
+                      form_location: "aurora_contact_cta",
+                    });
+                  }}
                   placeholder="you@yourbrand.com"
                   aria-label="Email address"
                   className="min-w-0 flex-1 bg-transparent px-6 text-white outline-none placeholder:text-white/30"

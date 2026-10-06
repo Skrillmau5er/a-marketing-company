@@ -15,6 +15,7 @@ import { GradientSlider } from "@/components/fx/gradient-slider";
 import { Magnetic } from "@/components/fx/magnetic";
 import { ScrambleText } from "@/components/fx/scramble-text";
 import { burst, burstFrom } from "@/lib/burst";
+import { pendo } from "@/lib/pendo";
 import { cn, seeded } from "@/lib/utils";
 
 const NEON = ["#ff2bd6", "#22d3ee", "#facc15", "#a855f7", "#ff2e88"];
@@ -151,6 +152,29 @@ const THEMES: Record<string, string> = { pink: "#ff2bd6", cyan: "#22d3ee", lime:
 
 const QUICK = ["help", "launch", "hype", "theme cyan", "party"];
 
+// Every command name respond() handles, plus "clear" (handled in run()). Anything else falls through to "command not found".
+const COMMANDS = new Set(["help", "launch", "hype", "theme", "whoami", "party", "sudo", "clear"]);
+
+type CommandSource = "typed" | "quick_command";
+
+// Pendo: terminal commands run this session (module-level so navigating away and back doesn't reset it).
+let commandCount = 0;
+
+/** Pendo: free text is capped at 50 chars, and the raw input is only sent for commands the terminal doesn't recognize. */
+function trackCommand(raw: string, source: CommandSource) {
+  const [name, arg = ""] = raw.trim().toLowerCase().split(/\s+/);
+  const recognized = COMMANDS.has(name);
+  commandCount += 1;
+  pendo.track("terminal_command_executed", {
+    command_name: name.slice(0, 50),
+    command_arg: arg.slice(0, 50),
+    is_recognized: recognized,
+    input_method: source,
+    ...(recognized ? {} : { raw_command: raw.trim().slice(0, 50) }),
+    command_count: commandCount,
+  });
+}
+
 function TerminalSection() {
   const [lines, setLines] = useState<Line[]>([
     { id: 0, kind: "sys", text: "AMC-OS v9.9 — hype kernel loaded.\nType 'help' or tap a command below." },
@@ -208,17 +232,19 @@ function TerminalSection() {
     }
   };
 
-  const run = (raw: string) => {
+  const run = (raw: string, source: CommandSource) => {
     const cmd = raw.trim().toLowerCase();
     if (!cmd) return;
     if (cmd === "clear") {
       setLines([]);
+      trackCommand(raw, source);
       return;
     }
     const inId = nextId.current++;
     const outId = nextId.current++;
     const text = respond(cmd);
     setLines((ls) => [...ls, { id: inId, kind: "in", text: raw.trim() }, { id: outId, kind: "out", text }]);
+    trackCommand(raw, source);
   };
 
   const autoType = async (cmd: string) => {
@@ -232,7 +258,7 @@ function TerminalSection() {
     }
     await new Promise((r) => setTimeout(r, 250));
     if (cancelled.current) return;
-    run(cmd);
+    run(cmd, "quick_command");
     setInput("");
     setBusy(false);
   };
@@ -277,7 +303,7 @@ function TerminalSection() {
               <form
                 onSubmit={(e) => {
                   e.preventDefault();
-                  run(input);
+                  run(input, "typed");
                   setInput("");
                 }}
                 className="flex"
@@ -569,18 +595,31 @@ function FlipCard({ campaign, index }: { campaign: (typeof CAMPAIGNS)[number]; i
   );
 }
 
+// Pendo: launches this session (module-level so navigating away and back doesn't reset it).
+let launchCount = 0;
+
 function HoldToLaunch() {
   const progress = useMotionValue(0);
   const controls = useRef<AnimationPlaybackControls | null>(null);
   const buttonRef = useRef<HTMLButtonElement>(null);
   const [scope, animateScope] = useAnimate();
   const [launched, setLaunched] = useState(false);
+  // Pendo: holds started since the last launch (abandoned ones included), and how the latest hold began.
+  const attempts = useRef(0);
+  const inputMethod = useRef("");
 
   const scale = useTransform(progress, [0, 1], [1, 1.18]);
   const jitter = useTransform(progress, (p) => (Math.random() - 0.5) * p * 10);
   const glow = useTransform(progress, (p) => `0 0 ${20 + p * 120}px ${p * 30}px rgba(255,43,214,${0.3 + p * 0.5})`);
 
   const launch = () => {
+    launchCount += 1;
+    pendo.track("hold_to_launch_completed", {
+      input_method: inputMethod.current,
+      attempt_count: attempts.current,
+      launch_count: launchCount,
+    });
+    attempts.current = 0;
     setLaunched(true);
     const el = buttonRef.current;
     if (el) {
@@ -598,8 +637,10 @@ function HoldToLaunch() {
     }, 3000);
   };
 
-  const start = () => {
+  const start = (method: string) => {
     if (launched) return;
+    attempts.current += 1;
+    inputMethod.current = method;
     controls.current?.stop();
     controls.current = animate(progress, 1, {
       duration: 1.6 * (1 - progress.get()),
@@ -622,10 +663,10 @@ function HoldToLaunch() {
       <Magnetic strength={0.2}>
         <motion.button
           ref={buttonRef}
-          onPointerDown={start}
+          onPointerDown={(e) => start(e.pointerType)}
           onPointerUp={cancel}
           onPointerLeave={cancel}
-          onKeyDown={(e) => (e.key === " " || e.key === "Enter") && !e.repeat && start()}
+          onKeyDown={(e) => (e.key === " " || e.key === "Enter") && !e.repeat && start("keyboard")}
           onKeyUp={cancel}
           style={{ scale, x: jitter, boxShadow: glow }}
           className="relative grid size-52 touch-none select-none place-items-center rounded-full bg-[#14002a]"

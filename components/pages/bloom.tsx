@@ -17,6 +17,7 @@ import {
 import { useEffect, useRef, useState } from "react";
 import { Magnetic } from "@/components/fx/magnetic";
 import { burstFrom } from "@/lib/burst";
+import { pendo } from "@/lib/pendo";
 import { clamp, cn } from "@/lib/utils";
 
 const PASTELS = ["#ff9ecd", "#ffc59e", "#c9a7ff", "#9ee6ff", "#a7f3c9", "#ffe58f"];
@@ -179,10 +180,32 @@ function SeedButton({ children, className }: { children: React.ReactNode; classN
 }
 
 const TAGLINES = ["bloom loudly.", "soft power, hard results.", "grown, not made.", "petal to the metal.", "naturally irresistible."];
+const DEFAULT_BRAND = "Bloom & Co";
+
+// Pendo: the last brand name tracked this session (module-level so a remount doesn't re-send it).
+let lastTrackedBrand = "";
 
 function NameLab() {
-  const [name, setName] = useState("Bloom & Co");
+  const [name, setName] = useState(DEFAULT_BRAND);
+  const wasTruncated = useRef(false);
   const tagline = TAGLINES[name.length % TAGLINES.length];
+
+  // Pendo: onChange fires on every keystroke, so wait until typing stops (1.5s). Empty input, the default name and a
+  // repeat of the last tracked name aren't sent.
+  useEffect(() => {
+    const brand = name.trim();
+    if (!brand || brand === DEFAULT_BRAND || brand === lastTrackedBrand) return;
+    const timer = setTimeout(() => {
+      lastTrackedBrand = brand;
+      pendo.track("brand_name_previewed", {
+        brand_name: brand,
+        name_length: brand.length,
+        tagline,
+        was_truncated: wasTruncated.current,
+      });
+    }, 1500);
+    return () => clearTimeout(timer);
+  }, [name, tagline]);
 
   return (
     <section className="relative px-6 py-32 text-center">
@@ -193,7 +216,10 @@ function NameLab() {
       <div className="mx-auto mt-10 max-w-md">
         <input
           value={name}
-          onChange={(e) => setName(e.target.value.slice(0, 16))}
+          onChange={(e) => {
+            wasTruncated.current = e.target.value.length > 16;
+            setName(e.target.value.slice(0, 16));
+          }}
           placeholder="Your brand name"
           aria-label="Brand name"
           className="w-full rounded-full border-2 border-[#2b1a2e]/10 bg-white px-7 py-4 text-center text-xl shadow-[0_10px_40px_-15px_rgba(124,77,219,0.5)] outline-none transition-[border-color,box-shadow] focus:border-[#c9a7ff] focus:shadow-[0_0_0_8px_rgba(201,167,255,0.3)]"
