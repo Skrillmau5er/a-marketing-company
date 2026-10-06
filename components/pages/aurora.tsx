@@ -21,6 +21,7 @@ import { TiltCard } from "@/components/fx/tilt-card";
 import { Typewriter } from "@/components/fx/typewriter";
 import { VelocityMarquee } from "@/components/fx/velocity-marquee";
 import { burstFrom } from "@/lib/burst";
+import { pendo } from "@/lib/pendo";
 import { cn } from "@/lib/utils";
 
 const WORDS = ["unforgettable.", "electric.", "go viral.", "iconic.", "glow."] as const;
@@ -286,11 +287,17 @@ const CHANNELS = [
 
 const compact = new Intl.NumberFormat("en-US", { notation: "compact", maximumFractionDigits: 1 });
 
+const INTENSITY_LABELS = ["Polite", "Bold", "Loud", "Unhinged"];
+const intensityLabel = (v: number) => INTENSITY_LABELS[Math.min(3, Math.floor(v / 25))];
+
 function PricingLab() {
   const [reach, setReach] = useState(45);
   const [intensity, setIntensity] = useState(60);
   const [channels, setChannels] = useState<string[]>(["social", "video"]);
   const [yearly, setYearly] = useState(false);
+  // Set by the controls, so the defaults shown on mount are never reported as an estimate.
+  const interacted = useRef(false);
+  const lastTracked = useRef("");
 
   const audience = Math.round(10 ** (3 + (reach / 100) * 4));
   const channelCost = CHANNELS.filter((c) => channels.includes(c.id)).reduce((sum, c) => sum + c.cost, 0);
@@ -311,7 +318,35 @@ function PricingLab() {
     hue.set(260 + reach * 1.4 + intensity * 0.6);
   }, [reach, intensity, hue]);
 
-  const toggle = (id: string) => setChannels((cs) => (cs.includes(id) ? cs.filter((c) => c !== id) : [...cs, id]));
+  // Report the estimate the visitor settles on: 1.5s after their last change, skipping exact repeats.
+  useEffect(() => {
+    if (!interacted.current) return;
+    const t = setTimeout(() => {
+      const mix = CHANNELS.filter((c) => channels.includes(c.id)).map((c) => c.id).join(",");
+      const key = `${reach}|${intensity}|${mix}|${yearly}`;
+      if (key === lastTracked.current) return;
+      lastTracked.current = key;
+      pendo.track("pricing_estimate_configured", {
+        reach,
+        audience,
+        intensity,
+        intensity_label: intensityLabel(intensity),
+        channels: mix,
+        channel_count: channels.length,
+        channel_cost: channelCost,
+        billing_period: yearly ? "yearly" : "monthly",
+        monthly_price: monthly,
+        displayed_price: Math.round(price),
+        hype,
+      });
+    }, 1500);
+    return () => clearTimeout(t);
+  }, [reach, intensity, channels, yearly, audience, channelCost, monthly, price, hype]);
+
+  const toggle = (id: string) => {
+    interacted.current = true;
+    setChannels((cs) => (cs.includes(id) ? cs.filter((c) => c !== id) : [...cs, id]));
+  };
 
   return (
     <section className="relative px-6 py-32">
@@ -333,7 +368,10 @@ function PricingLab() {
               value={reach}
               min={0}
               max={100}
-              onChange={setReach}
+              onChange={(v) => {
+                interacted.current = true;
+                setReach(v);
+              }}
               format={() => `${compact.format(audience)} people`}
             />
             <GradientSlider
@@ -341,8 +379,11 @@ function PricingLab() {
               value={intensity}
               min={0}
               max={100}
-              onChange={setIntensity}
-              format={(v) => ["Polite", "Bold", "Loud", "Unhinged"][Math.min(3, Math.floor(v / 25))]}
+              onChange={(v) => {
+                interacted.current = true;
+                setIntensity(v);
+              }}
+              format={intensityLabel}
               gradient="linear-gradient(90deg,#facc15,#fb7185,#ff2bd6)"
             />
 
@@ -392,7 +433,10 @@ function PricingLab() {
                 return (
                   <button
                     key={label}
-                    onClick={() => setYearly(label === "Yearly")}
+                    onClick={() => {
+                      interacted.current = true;
+                      setYearly(label === "Yearly");
+                    }}
                     className={cn("relative rounded-full px-5 py-2 text-sm font-medium", active ? "text-black" : "text-white/70")}
                   >
                     {active && (
@@ -449,6 +493,7 @@ function PricingLab() {
 function ContactCTA() {
   const [email, setEmail] = useState("");
   const [sent, setSent] = useState(false);
+  const tracked = useRef(false);
   const headline = "Let's make noise.";
 
   return (
@@ -494,6 +539,16 @@ function ContactCTA() {
                 const button = e.currentTarget.querySelector("button");
                 if (button) burstFrom(button, { count: 260, power: 18 });
                 setSent(true);
+                // The form stays clickable while it animates out, so only report the first submit.
+                if (!tracked.current) {
+                  tracked.current = true;
+                  // Send only the email's domain, never the address itself (PII).
+                  pendo.track("contact_email_submitted", {
+                    form_location: "aurora_contact_cta",
+                    email_domain: email.split("@").pop()?.toLowerCase() ?? "",
+                    headline,
+                  });
+                }
               }}
               className="conic-border flex h-full rounded-full p-[2px]"
             >

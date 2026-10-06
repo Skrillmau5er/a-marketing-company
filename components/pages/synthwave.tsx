@@ -15,6 +15,7 @@ import { GradientSlider } from "@/components/fx/gradient-slider";
 import { Magnetic } from "@/components/fx/magnetic";
 import { ScrambleText } from "@/components/fx/scramble-text";
 import { burst, burstFrom } from "@/lib/burst";
+import { pendo } from "@/lib/pendo";
 import { cn, seeded } from "@/lib/utils";
 
 const NEON = ["#ff2bd6", "#22d3ee", "#facc15", "#a855f7", "#ff2e88"];
@@ -151,6 +152,9 @@ const THEMES: Record<string, string> = { pink: "#ff2bd6", cyan: "#22d3ee", lime:
 
 const QUICK = ["help", "launch", "hype", "theme cyan", "party"];
 
+/** Commands respond() answers (`clear` is handled in run()); anything else is "command not found". */
+const COMMANDS = ["help", "launch", "hype", "theme", "whoami", "party", "sudo"];
+
 function TerminalSection() {
   const [lines, setLines] = useState<Line[]>([
     { id: 0, kind: "sys", text: "AMC-OS v9.9 — hype kernel loaded.\nType 'help' or tap a command below." },
@@ -161,6 +165,7 @@ function TerminalSection() {
   const [party, setParty] = useState(false);
   const nextId = useRef(1);
   const hypeCount = useRef(0);
+  const commandCount = useRef(0);
   const scrollRef = useRef<HTMLDivElement>(null);
   const contentRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
@@ -208,9 +213,19 @@ function TerminalSection() {
     }
   };
 
-  const run = (raw: string) => {
+  const run = (raw: string, source: "typed" | "quick_command") => {
     const cmd = raw.trim().toLowerCase();
     if (!cmd) return;
+    const [name, arg] = cmd.split(/\s+/);
+    const recognized = cmd === "clear" || COMMANDS.includes(name);
+    // Only known command names and theme keys are sent, never the visitor's free text.
+    pendo.track("terminal_command_executed", {
+      command: recognized ? name : "unrecognized",
+      argument: name === "theme" && arg && Object.hasOwn(THEMES, arg) ? arg : undefined,
+      recognized,
+      input_method: source,
+      command_index: ++commandCount.current,
+    });
     if (cmd === "clear") {
       setLines([]);
       return;
@@ -232,7 +247,7 @@ function TerminalSection() {
     }
     await new Promise((r) => setTimeout(r, 250));
     if (cancelled.current) return;
-    run(cmd);
+    run(cmd, "quick_command");
     setInput("");
     setBusy(false);
   };
@@ -277,7 +292,7 @@ function TerminalSection() {
               <form
                 onSubmit={(e) => {
                   e.preventDefault();
-                  run(input);
+                  run(input, "typed");
                   setInput("");
                 }}
                 className="flex"
@@ -360,6 +375,8 @@ const lerp = (a: number, b: number, t: number) => a + (b - a) * t;
 function VibeMixer() {
   const [vibe, setVibe] = useState<Vibe>(PRESETS.Miami);
   const [preset, setPreset] = useState("Miami");
+  // The visitor's last preset or slider; a new object per action restarts the debounce below.
+  const [lastAction, setLastAction] = useState<{ control: string } | null>(null);
   const vibeRef = useRef(vibe);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const tween = useRef<AnimationPlaybackControls | null>(null);
@@ -435,8 +452,28 @@ function VibeMixer() {
     };
   }, []);
 
+  // Report the look the visitor ends on, 1.5s after their last action. Keyed off user actions, not
+  // `vibe`, which a preset glide updates every frame for 0.9s.
+  useEffect(() => {
+    if (!lastAction) return;
+    const t = setTimeout(() => {
+      const v = vibeRef.current; // settled: the preset glide has finished
+      pendo.track("vibe_mixer_customized", {
+        preset: preset || "custom",
+        is_custom: !preset,
+        hue: Math.round(v.hue),
+        speed: Number(v.speed.toFixed(1)),
+        amp: Math.round(v.amp),
+        waves: Math.round(v.waves),
+        last_control: lastAction.control,
+      });
+    }, 1500);
+    return () => clearTimeout(t);
+  }, [lastAction, preset]);
+
   const applyPreset = (name: string) => {
     setPreset(name);
+    setLastAction({ control: name });
     tween.current?.stop();
     const from = vibe;
     const to = PRESETS[name];
@@ -456,6 +493,7 @@ function VibeMixer() {
   const update = (key: keyof Vibe) => (value: number) => {
     tween.current?.stop();
     setPreset("");
+    setLastAction({ control: key });
     setVibe((v) => ({ ...v, [key]: value }));
   };
 
@@ -575,6 +613,11 @@ function HoldToLaunch() {
   const buttonRef = useRef<HTMLButtonElement>(null);
   const [scope, animateScope] = useAnimate();
   const [launched, setLaunched] = useState(false);
+  const holding = useRef(false);
+  const holdStart = useRef(0);
+  const inputMethod = useRef<"pointer" | "keyboard">("pointer");
+  const abandonedAttempts = useRef(0);
+  const launchCount = useRef(0);
 
   const scale = useTransform(progress, [0, 1], [1, 1.18]);
   const jitter = useTransform(progress, (p) => (Math.random() - 0.5) * p * 10);
@@ -582,6 +625,14 @@ function HoldToLaunch() {
 
   const launch = () => {
     setLaunched(true);
+    holding.current = false;
+    pendo.track("hold_to_launch_completed", {
+      input_method: inputMethod.current,
+      abandoned_attempts: abandonedAttempts.current,
+      hold_duration_ms: Math.round(performance.now() - holdStart.current),
+      launch_count: ++launchCount.current,
+    });
+    abandonedAttempts.current = 0;
     const el = buttonRef.current;
     if (el) {
       const r = el.getBoundingClientRect();
@@ -598,8 +649,11 @@ function HoldToLaunch() {
     }, 3000);
   };
 
-  const start = () => {
+  const start = (method: "pointer" | "keyboard") => {
     if (launched) return;
+    holding.current = true;
+    holdStart.current = performance.now();
+    inputMethod.current = method;
     controls.current?.stop();
     controls.current = animate(progress, 1, {
       duration: 1.6 * (1 - progress.get()),
@@ -610,6 +664,11 @@ function HoldToLaunch() {
 
   const cancel = () => {
     if (launched || progress.get() >= 1) return;
+    // Only a release that interrupts a hold is an abandoned attempt (not hover-outs or the spring-back).
+    if (holding.current) {
+      holding.current = false;
+      abandonedAttempts.current++;
+    }
     controls.current?.stop();
     controls.current = animate(progress, 0, { type: "spring", stiffness: 200, damping: 20 });
   };
@@ -622,10 +681,10 @@ function HoldToLaunch() {
       <Magnetic strength={0.2}>
         <motion.button
           ref={buttonRef}
-          onPointerDown={start}
+          onPointerDown={() => start("pointer")}
           onPointerUp={cancel}
           onPointerLeave={cancel}
-          onKeyDown={(e) => (e.key === " " || e.key === "Enter") && !e.repeat && start()}
+          onKeyDown={(e) => (e.key === " " || e.key === "Enter") && !e.repeat && start("keyboard")}
           onKeyUp={cancel}
           style={{ scale, x: jitter, boxShadow: glow }}
           className="relative grid size-52 touch-none select-none place-items-center rounded-full bg-[#14002a]"
